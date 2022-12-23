@@ -21,12 +21,13 @@ then
 fi
 
 
-if [ ! -d "client" ] && [ ! -d "server" ]
+if [ ! -d "client" ] && [ ! -d "server" ] && [ ! -d "docker" ]
 then
     mkdir client
     mkdir server
+    mkdir -p docker/nginx
 else
-    echo client and or server directories already exists
+    echo client, server and or docker directories already exists
     exit
 fi
 
@@ -35,7 +36,7 @@ pushd client
 npx create-react-app . --template typescript
 rm package-lock.json
 yarn
-sed -i.bak 's/\("version".*\)/\1\n  "proxy": "http:\/\/localhost:3000",/g' package.json
+sed -i.bak 's/\("version".*\)/\1\n  "proxy": "http:\/\/localhost:9000",/g' package.json
 rm package.json.bak
 
 ### SERVER
@@ -62,7 +63,7 @@ const app = express()
 const router = Router()
 app.use(router)
 
-const port = process.env.APPLICATION_PORT || 3000
+const port = process.env.APPLICATION_PORT || 9000
 
 router.get('/api', async (req, res) => {
     res.json({message: "api is active"})
@@ -84,5 +85,74 @@ router.get('/api/example/:str', async (req, res) => {
 app.listen(port, () => {console.log(\`Server started on port \${port}\`)})
 END
 
+### DOCKER
+popd
+pushd docker/nginx
 
+cat <<END >> default.conf
+server {
+    listen       80;
+    server_name  localhost;
 
+    location / {
+        root   /usr/share/nginx/html;
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /api {
+        proxy_pass http://localhost:9000;
+    }
+
+    # redirect server error pages to the static page /50x.html
+    #
+    error_page   500 502 503 504  /50x.html;
+    location = /50x.html {
+        root   /usr/share/nginx/html;
+        try_files $uri $uri/ /index.html;
+    }
+}
+END
+
+popd
+cat <<END >> Dockerfile
+FROM nginx:alpine
+
+### CLIENT
+RUN rm -rf /usr/share/nginx/html/*
+
+COPY docker/nginx/default.conf /etc/nginx/conf.d/
+COPY client/build/ /usr/share/nginx/html/
+
+### SERVER
+RUN apk --update add nodejs supervisor
+
+COPY service_script.conf /
+WORKDIR app
+COPY server/ .
+
+EXPOSE 80
+
+CMD ["supervisord", "-c", "/service_script.conf"]
+END
+
+cat <<END >> service_script.conf
+[supervisord]
+nodaemon=true
+
+[program:nginx]
+command=nginx -g "daemon off;"
+autorestart=true
+stderr_logfile=/dev/stdout
+stderr_logfile_maxbytes=0
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+
+[program:nodejs]
+command=node server
+autostart=true
+autorestart=true
+stderr_logfile=/dev/stdout
+stderr_logfile_maxbytes=0
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+END
