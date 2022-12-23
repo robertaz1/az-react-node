@@ -47,7 +47,13 @@ yarn add axios
 yarn add express-promise-router
 yarn add nodemon -D
 
-file=$(cat <<-END
+sed -i.bak 's/index\.js/server.js/g' package.json
+rm package.json.bak
+
+sed -i.bak 's/\("test".*\)/\1,\n    "start": "node server",\n    "dev": "nodemon server"/g' package.json
+rm package.json.bak
+
+cat <<END >> server.js
 const express = require('express')
 const Router  = require("express-promise-router")
 const axios = require('axios')
@@ -62,10 +68,21 @@ router.get('/api', async (req, res) => {
     res.json({message: "api is active"})
 })
 
-app.listen(port, () => {console.log(`Server started on port ${port}`)})
-END
-)
+router.get('/api/example/:str', async (req, res) => {
+    const str = req.params['str']
+    const url = \`https://robohash.org/\${str}.png?set=set5\`
+    console.log(\`loading url: \${url}\`)
+    return axios.get(url, {
+        responseType: 'arraybuffer' 
+    }).then(r => {
+        const headers = {'Content-Type': r.headers['content-type']}
+        res.writeHead(200, headers)
+        return res.end(Buffer.from(r.data), 'binary')
+    })
+})
 
-echo $file > server.js
+app.listen(port, () => {console.log(\`Server started on port \${port}\`)})
+END
+
 
 
