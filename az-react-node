@@ -41,21 +41,67 @@ yarn
 sed -i.bak 's/\("version".*\)/\1\n  "proxy": "http:\/\/localhost:9000",/g' package.json
 rm package.json.bak
 
+yarn add graphql
+yarn add @apollo/client
+
+
 pushd src
 rm App.tsx
 cat <<END >> App.tsx
-import './App.css';
+import {ApolloClient, ApolloProvider, HttpLink, InMemoryCache} from "@apollo/client"
+import './App.css'
+import Example from "./Example"
+
+const client = new ApolloClient<unknown>({
+    cache: new InMemoryCache(),
+    link: new HttpLink({
+        uri: '/api/graphql'
+    })
+})
 
 function App() {
 
     return (
-        <div>
-            <img src={'/api/example/iamsparticus'}/>
-        </div>
-    );
+        <ApolloProvider client={client}>
+            <div>
+                <img src={'/api/example/iamsparticus'}/>
+            </div>
+            <Example></Example>
+        </ApolloProvider>
+    )
 }
 
-export default App;
+export default App
+END
+
+cat <<END >> Example.tsx
+import {gql, useQuery} from "@apollo/client"
+
+const ALL_USERS = gql\`
+query {
+    Users {
+        id
+        firstName
+        lastName
+    }
+}    
+\`
+
+const Example = () => {
+    const {loading, data} = useQuery(ALL_USERS)
+
+    if (loading) return <p>Loading...</p>
+
+    return <div style={{display: "flex", flexWrap: "wrap"}}>
+        {data.Users.map((record: {firstName: string, lastName: string, id: string}) =>
+            <div key={record.id} style={{padding: '10px'}}>
+                {record.firstName} {record.lastName}
+            </div>
+        )}
+    </div>
+}
+
+export default Example
 END
 
 
@@ -68,6 +114,9 @@ yarn add express
 yarn add axios
 yarn add express-promise-router
 yarn add nodemon -D
+yarn add graphql
+yarn add express-graphql
+yarn add casual -D
 
 sed -i.bak 's/index\.js/server.js/g' package.json
 rm package.json.bak
@@ -79,13 +128,15 @@ cat <<END >> server.js
 const express = require('express')
 const Router  = require("express-promise-router")
 const axios = require('axios')
+const {graphqlHTTP} = require('express-graphql')
 
 const app = express()
 const router = Router()
-app.use(router)
 
+const dev = process.env.ENV !== 'production'
 const port = process.env.APPLICATION_PORT || 9000
 
+app.use(router)
 router.get('/api', async (req, res) => {
     res.json({message: "api is active"})
 })
@@ -95,7 +146,7 @@ router.get('/api/example/:str', async (req, res) => {
     const url = \`https://robohash.org/\${str}.png?set=set4\`
     console.log(\`loading url: \${url}\`)
     return axios.get(url, {
-        responseType: 'arraybuffer' 
+        responseType: 'arraybuffer'
     }).then(r => {
         const headers = {'Content-Type': r.headers['content-type']}
         res.writeHead(200, headers)
@@ -103,12 +154,155 @@ router.get('/api/example/:str', async (req, res) => {
     })
 })
 
+const schema = require('./data/schema')
+
+app.use('/api/graphql', graphqlHTTP({
+    schema,
+    graphiql: dev,
+    pretty: dev
+}))
+
+
+const casual = require('casual');
+const mock = require('./data/mock')
+new Array(100).fill(1).forEach((_, idx) => {
+    console.log('generate')
+    mock.userList.push({
+        id: \`\${idx}\`,
+        firstName: casual.first_name,
+        lastName: casual.last_name
+    })
+})
+
+
 app.listen(port, () => {console.log(\`Server started on port \${port}\`)})
 END
 
 
-### DOCKER
+mkdir -p data/mutations data/queries data/types
+pushd data
+
+cat <<END >> mock.js
+module.exports = {
+    userList: []
+}
+END
+
+cat <<END >> schema.js
+const {GraphQLSchema, GraphQLObjectType} = require("graphql/type");
+const queries = require('./queries')
+const mutations = require('./mutations')
+
+module.exports = new GraphQLSchema({
+    query: new GraphQLObjectType({
+        name: 'Query',
+        fields: queries,
+        description: "Domain Queries"
+    }),
+    mutation: new GraphQLObjectType({
+        name: 'Mutation',
+        fields: mutations,
+        description: "Domain Mutations"
+    })
+})
+END
+
+pushd mutations
+cat <<END >> index.js
+const {GraphQLString} = require('graphql')
+const UserType = require("../types/user")
+
+const mock = require('../mock')
+
+module.exports = {
+    createUser: {
+        type: UserType,
+        args: {
+            firstName: {type: GraphQLString},
+            lastName: {type: GraphQLString},
+        },
+        description: 'Create User Record',
+        resolve(parent, args) {
+            return new Promise((resolve) => {
+                const id = mock.userList.length + 1
+                mock.userList.push({
+                    id,
+                    firstName: args.firstName,
+                    lastName: args.lastName,
+                })
+                resolve(mock.userList.filter((d) => d.id === id)[0])
+            })
+        }
+    }
+}
+END
+
 popd
+pushd queries
+
+cat <<END >> index.js
+const {GraphQLList} = require("graphql/type");
+const User = require('./user')
+const UserType = require('../types/user')
+
+const mock = require('../mock')
+
+module.exports = {
+    User,
+    Users: {
+        type: new GraphQLList(UserType),
+        resolve: (root, args) => {
+            return new Promise((resolve) => {
+                resolve(mock.userList)
+            })
+        }
+    }
+}
+END
+
+cat <<END >> user.js
+const {GraphQLNonNull, GraphQLID} = require("graphql/type");
+const mock = require('../mock')
+const UserType = require('../types/user')
+module.exports = {
+    type: UserType,
+    args: {
+        id: {
+            name: 'id',
+            type: new GraphQLNonNull(GraphQLID)
+        }
+    },
+    resolve: (root, args) => {
+        return new Promise((resolve) => {
+            resolve(
+                mock.userList.filter((d) => d.id === args.id)[0]
+            )
+        })
+    }
+}
+END
+
+popd
+pushd types
+
+cat <<END >> user.js
+const {GraphQLObjectType, GraphQLNonNull, GraphQLID, GraphQLString} = require("graphql/type")
+
+module.exports = new GraphQLObjectType({
+    name: 'User',
+    fields: () => ({
+        id: {type: new GraphQLNonNull(GraphQLID)},
+        firstName: {type: GraphQLString},
+        lastName: {type: GraphQLString},
+    })
+})
+END
+
+popd
+popd
+popd
+
+### DOCKER
 pushd docker/nginx
 
 cat <<END >> default.conf
